@@ -40,5 +40,4 @@ run_test "baseline" ""
 sudo tc qdisc del dev $IF root 2>/dev/null
 
 # log file
-python3 $RESULTS_DIR
 echo "All tests completed successfully."

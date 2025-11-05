@@ -41,12 +41,14 @@ The script will:
 Expected output example:
 
 ```
-[SERVER] Listening on 127.0.0.1:9999
-[CLIENT] INIT sent
-[CLIENT] DATA sent: "Hello, Server!"
-[SERVER] Received DATA from client
-[SERVER] Sent ACK
-[TEST] Baseline run complete – PASS
+Running scenario: baseline
+Server running on port 9999...
+Received msg_type=1 seq=1 payload_len=1 from ('127.0.0.1', 40251)
+Sent INIT_ACK to ('127.0.0.1', 40251) with seq=1
+Metrics collected and saved to ./results/baseline.csv
+Test for baseline completed
+--------------------------------
+All tests completed successfully.
 ```
 
 ---
@@ -65,4 +67,4 @@ In another terminal:
 
 ```bash
 python client.py
-```
+``
