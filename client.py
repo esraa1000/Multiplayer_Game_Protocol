@@ -16,6 +16,7 @@ metrics = MetricsLogger()
 def connect():
     """Send INIT and get player ID."""
     global player_id
+    #number used once 
     nonce = int(time.time() * 1000) & 0xFFFFFFFF
     payload = struct.pack('!I', nonce) + b"Player1"
     send_packet(sock, server_addr, MSG_INIT, 0, payload)
