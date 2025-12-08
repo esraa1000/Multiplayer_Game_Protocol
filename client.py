@@ -1,75 +1,114 @@
 import socket
 import struct
 import time
-import zlib
+import threading
+from protocol_constants import *
+from client_utils import *
 
-HEADER_FORMAT = "!4s B B I I Q H I"
-PROTOCOL_ID = b"CCLP"
-VERSION = 2
-
-HEADER_SIZE = struct.calcsize(HEADER_FORMAT)
-
-MSG_INIT = 0x01
-MSG_INIT_ACK = 0x02
-
-client_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+# Global state
+sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 server_addr = ("127.0.0.1", 9999)
+player_id = None
+latest_grid = None
+running = True
+metrics = MetricsLogger()
 
-seq_num = 1
-payload = b"\x01"   # client_id=1
-snapshot_id = 0
+def connect():
+    """Send INIT and get player ID."""
+    global player_id
+    nonce = int(time.time() * 1000) & 0xFFFFFFFF
+    payload = struct.pack('!I', nonce) + b"Player1"
+    send_packet(sock, server_addr, MSG_INIT, 0, payload)
+    
+    sock.settimeout(5.0)
+    data, _ = sock.recvfrom(2048)
+    parsed = parse_and_validate_header(data)
+    if parsed and parsed["msg_type"] == MSG_INIT_ACK:
+        _, player_id, _, _ = struct.unpack('!IBIQ', parsed["payload"][:17])
+        print(f"[CLIENT] Connected as Player {player_id}")
+        return True
+    return False
 
-# IMPORTANT: Use the SAME timestamp for both headers
-timestamp_ms = int(time.time() * 1000)
+def receive_loop():
+    """Background thread - receive and log packets."""
+    global latest_grid, running
+    sock.settimeout(0.1)
+    
+    while running:
+        try:
+            data, _ = sock.recvfrom(2048)
+            parsed = parse_and_validate_header(data)
+            if not parsed:
+                continue
+            
+           
+            metrics.log(player_id, parsed["snapshot_id"], parsed["seq_num"], 
+                       parsed["server_timestamp"], current_time_ms())
+            
+            
+            if parsed["msg_type"] == MSG_SNAPSHOT:
+                snap = parse_snapshot_payload(parsed["payload"])
+                if snap:
+                    latest_grid = snap
+                    print(f"[CLIENT] Snapshot {parsed['snapshot_id']} received")
+            
+          
+            elif parsed["msg_type"] == MSG_GAME_OVER:
+                print("[CLIENT] Game Over!")
+                running = False
+        except:
+            continue
 
-# 1) Build the temporary header with checksum = 0
-temp_header = struct.pack(
-    HEADER_FORMAT,
-    PROTOCOL_ID,
-    VERSION,
-    MSG_INIT,
-    snapshot_id,
-    seq_num,
-    timestamp_ms,
-    len(payload),
-    0
-)
+def send_move(row, col):
+    """Send acquire request for a cell."""
+    payload = struct.pack('!BBBQ', player_id, row, col, current_time_ms())
+    send_packet(sock, server_addr, MSG_EVENT, 0, payload)
+    print(f"[CLIENT] Sent move: ({row}, {col})")
 
-# 2) Compute checksum
-checksum = zlib.crc32(temp_header + payload) & 0xFFFFFFFF
+# this function will be deleted after the game UI is built
+def display_grid():
+    """Display current grid and scores."""
+    if latest_grid:
+        print("\n[CLIENT] Current Grid:")
+        for row in latest_grid['grid']:
+            print("  ", row)
+        print("[CLIENT] Scores:", latest_grid['scores'])
+        if latest_grid.get('game_over'):
+            print("[CLIENT] Game is over!")
+        print()
+    else:
+        print("[CLIENT] No grid received yet")
 
-# 3) Build final header with correct checksum
-final_header = struct.pack(
-    HEADER_FORMAT,
-    PROTOCOL_ID,
-    VERSION,
-    MSG_INIT,
-    snapshot_id,
-    seq_num,
-    timestamp_ms,
-    len(payload),
-    checksum
-)
-
-packet = final_header + payload
-client_socket.sendto(packet, server_addr)
-
-print("[CLIENT] INIT sent")
-
-# Receive response
-data, _ = client_socket.recvfrom(2048)
-recv_header = data[:HEADER_SIZE]
-recv_payload = data[HEADER_SIZE:]
-
-(
-    protocol_id,
-    version,
-    msg_type,
-    snapshot_id,
-    seq_num,
-    server_timestamp,
-    payload_len,
-    checksum
-) = struct.unpack(HEADER_FORMAT, recv_header)
-
-print(f"[CLIENT] Received msg_type={msg_type} seq={seq_num} payload={recv_payload}")
+# This section will be deleted after the game UI is built (should be replaced by event loop in GUI)
+if __name__ == "__main__":
+    if not connect():
+        print("[CLIENT] Connection failed")
+        exit(1)
+    
+    # Start receiver
+    threading.Thread(target=receive_loop, daemon=True).start()
+    print("[CLIENT] Waiting for snapshots...")
+    time.sleep(1)
+    
+    # Send some moves
+    print("\n[CLIENT] Sending moves...")
+    send_move(0, 0)
+    time.sleep(0.5)
+    send_move(1, 1)
+    time.sleep(0.5)
+    send_move(2, 2)
+    time.sleep(1)
+    
+    # Display grid
+    display_grid()
+    
+    # Wait for game over
+    print("[CLIENT] Running... Press Ctrl+C to stop")
+    try:
+        while running:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\n[CLIENT] Stopping...")
+    
+    sock.close()
+    print("[CLIENT] Disconnected")
