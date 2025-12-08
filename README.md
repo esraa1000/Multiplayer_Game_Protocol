@@ -1,6 +1,6 @@
 ## **Description**
 
-This prototype demonstrates **INIT** and **DATA** message exchanges using a custom **UDP-based protocol** for the Mini-RFC assignment.
+This prototype demonstrates **INIT** and **DATA** message exchanges using a custom **UDP-based protocol** for the Mini-RFC.
 It verifies that the client and server can communicate correctly and exchange structured messages under the specified constraints.
 
 
