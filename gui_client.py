@@ -112,14 +112,20 @@ def update_canvas(canvas):
         for c in range(GRID_SIZE):
             owner = grid[r][c]
 
-            if owner == 0:
-                color = "white"
-            elif owner == player_id:
-                color = "blue"   # my cells
-            else:
-                color = "red"    # opponent cells
+        if owner == 0:
+            color = "white"              # unclaimed
+        elif owner == 1:
+            color = "#ff9999"            # player 1 - soft red
+        elif owner == 2:
+            color = "#9999ff"            # player 2 - soft blue
+        elif owner == 3:
+            color = "#99ff99"            # player 3 - soft green
+        elif owner == 4:
+            color = "#ffcc99"            # player 4 - soft orange
+        else:
+            color = "gray"               # fallback for >4 players
 
-            canvas.itemconfig(rects[r][c], fill=color)
+        canvas.itemconfig(rects[r][c], fill=color)
 
 #mouse click handler
 def on_click(event):
