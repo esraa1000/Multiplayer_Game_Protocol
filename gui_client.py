@@ -14,7 +14,7 @@ from client_utils import (
 )
 
 # Server address
-SERVER_ADDR = ("127.0.0.1", 9999)
+SERVER_ADDR = ("192.168.8.102", 9999)
 
 GRID_SIZE = 5
 CELL_SIZE = 80
@@ -25,19 +25,18 @@ latest_grid = None
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-# ====== DISTINCT COLORS FOR EACH PLAYER ======
+
+# ====== PASTEL COLORS FOR EXACTLY 4 PLAYERS ======
 PLAYER_COLORS = [
-    "white",     # owner = 0 (empty)
-    "blue",      # Player 1
-    "red",       # Player 2
-    "green",     # Player 3
-    "purple",    # Player 4
-    "orange",    # Player 5
-    "yellow",    # Player 6
-    "pink",      # Player 7
-    "cyan",      # Player 8
+    "#ffffff",   # 0 = empty (white)
+
+    "#ffb3ba",   # Player 1 = pastel pink
+    "#bae1ff",   # Player 2 = pastel blue
+    "#baffc9",   # Player 3 = pastel green
+    "#ffdfba",   # Player 4 = pastel orange
 ]
-# =============================================
+# ================================================
+
 
 # INIT HANDSHAKE
 def connect():
@@ -124,12 +123,13 @@ def update_canvas(canvas):
         for c in range(GRID_SIZE):
             owner = grid[r][c]
 
-            if owner < len(PLAYER_COLORS):
+            if 0 <= owner < len(PLAYER_COLORS):
                 color = PLAYER_COLORS[owner]
             else:
-                color = "gray"
+                color = "#cccccc"   # fallback gray for invalid IDs
 
             canvas.itemconfig(rects[r][c], fill=color)
+
 
 # Mouse click event
 def on_click(event):
