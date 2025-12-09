@@ -1,6 +1,7 @@
 import threading
 import socket
 import tkinter as tk
+from tkinter import messagebox
 import struct
 import time
 
@@ -11,37 +12,43 @@ from client_utils import (
     parse_snapshot_payload,
     current_time_ms
 )
-#el server address wl port betaato
-SERVER_ADDR = ("127.0.0.1", 9999)
+
+# Server address
+SERVER_ADDR = ("192.168.8.102", 9999)
 
 GRID_SIZE = 5
 CELL_SIZE = 80
 
 running = True
-#hayakhod id baad el INIT
 player_id = None
 latest_grid = None
 
-#baamel UDP socket lel communication
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
 
+# ====== PASTEL COLORS FOR EXACTLY 4 PLAYERS ======
+PLAYER_COLORS = [
+    "#ffffff",   # 0 = empty (white)
+
+    "#ffb3ba",   # Player 1 = pastel pink
+    "#bae1ff",   # Player 2 = pastel blue
+    "#baffc9",   # Player 3 = pastel green
+    "#ffdfba",   # Player 4 = pastel orange
+]
+# ================================================
+
 
 # INIT HANDSHAKE
-
 def connect():
     global player_id
 
     nonce = int(time.time() * 1000) & 0xFFFFFFFF
-    #init payload
     payload = struct.pack("!I", nonce) + b"GUI_Player"
 
-
-    #han send el init
     send_packet(sock, SERVER_ADDR, MSG_INIT, 0, payload)
 
     sock.settimeout(5)
-    #hanestana el INIT_ACK
+
     data, _ = sock.recvfrom(2048)
     parsed = parse_and_validate_header(data)
 
@@ -49,8 +56,6 @@ def connect():
         print("[GUI] INIT_ACK failed.")
         return False
 
-    # INIT_ACK payload = nonce(4), player_id(1), snapshot_id(4), server_time(8)
-    #unpack el payload
     nonce_recv, pid, _, _ = struct.unpack("!IBIQ", parsed["payload"][:17])
     if nonce_recv != nonce:
         print("[GUI] Nonce mismatch, invalid INIT_ACK.")
@@ -60,48 +65,54 @@ def connect():
     print(f"[GUI] Connected as Player {player_id}")
     return True
 
-
-
 # EVENT: user clicks a cell
-
 def send_move(row, col):
     payload = struct.pack("!BBBQ", player_id, row, col, current_time_ms())
     send_packet(sock, SERVER_ADDR, MSG_EVENT, 0, payload)
 
-
-
-# RECEIVE LOOP (runs in thread)
-
-def receive_loop(canvas):
+# RECEIVE LOOP
+def receive_loop(canvas, root):
     global latest_grid, running
     sock.settimeout(0.1)
 
     while running:
         try:
-            #receive packets
             data, _ = sock.recvfrom(4096)
             parsed = parse_and_validate_header(data)
+
             if not parsed:
                 continue
-            #handle el snapshot 
+
             if parsed["msg_type"] == MSG_SNAPSHOT:
                 snap = parse_snapshot_payload(parsed["payload"])
                 if snap:
                     latest_grid = snap
                     update_canvas(canvas)
 
-            #game over
             elif parsed["msg_type"] == MSG_GAME_OVER:
                 print("[GUI] GAME OVER received.")
                 running = False
 
+                # ===== EXTRACT WINNER ID FROM PAYLOAD =====
+                try:
+                    winner_id = parsed["payload"][0]   # 1 byte winner ID
+                except:
+                    winner_id = None
+
+                # ===== SHOW POPUP EXACTLY ONCE =====
+                def show_game_over():
+                    if winner_id is None:
+                        msg = "The game has ended!"
+                    else:
+                        msg = f"Player {winner_id} has won the game!"
+                    messagebox.showinfo("Game Over", msg)
+
+                root.after(0, show_game_over)
+
         except:
             continue
 
-
-
-# GUI RELATED STUFF
-
+# GUI UPDATE
 def update_canvas(canvas):
     if not latest_grid:
         return
@@ -112,32 +123,22 @@ def update_canvas(canvas):
         for c in range(GRID_SIZE):
             owner = grid[r][c]
 
-        if owner == 0:
-            color = "white"              # unclaimed
-        elif owner == 1:
-            color = "#ff9999"            # player 1 - soft red
-        elif owner == 2:
-            color = "#9999ff"            # player 2 - soft blue
-        elif owner == 3:
-            color = "#99ff99"            # player 3 - soft green
-        elif owner == 4:
-            color = "#ffcc99"            # player 4 - soft orange
-        else:
-            color = "gray"               # fallback for >4 players
+            if 0 <= owner < len(PLAYER_COLORS):
+                color = PLAYER_COLORS[owner]
+            else:
+                color = "#cccccc"   # fallback gray for invalid IDs
 
-        canvas.itemconfig(rects[r][c], fill=color)
+            canvas.itemconfig(rects[r][c], fill=color)
 
-#mouse click handler
+
+# Mouse click event
 def on_click(event):
     r = event.y // CELL_SIZE
     c = event.x // CELL_SIZE
     if 0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE:
         send_move(r, c)
 
-
-
 # MAIN
-
 if __name__ == "__main__":
     if not connect():
         print("[GUI] Could not connect. Exiting.")
@@ -158,7 +159,8 @@ if __name__ == "__main__":
 
     canvas.bind("<Button-1>", on_click)
 
-    threading.Thread(target=receive_loop, args=(canvas,), daemon=True).start()
+    # root is passed safely
+    threading.Thread(target=receive_loop, args=(canvas, root), daemon=True).start()
 
     root.mainloop()
 
