@@ -1,110 +1,28 @@
+# server_utils.py
 import struct
+import binascii
 import time
-import zlib
-
-from protocol_constants import (
-    HEADER_FORMAT,
-    HEADER_SIZE,
-    PROTOCOL_ID,
-    VERSION
-)
-
-# GLOBAL SEQ COUNTER
-seq_counter = 0
-
-def next_seq_num():
-    global seq_counter
-    seq_counter += 1
-    return seq_counter
+from protocol_constants import HEADER_FMT, HEADER_SIZE, PROTO_ID, VERSION
 
 def current_time_ms():
     return int(time.time() * 1000)
 
-def compute_crc32(header_without_crc, payload_bytes):
-    return zlib.crc32(header_without_crc + payload_bytes) & 0xFFFFFFFF
+def crc32(data: bytes) -> int:
+    return binascii.crc32(data) & 0xffffffff
 
-def pack_header(msg_type, snapshot_id, seq_num, timestamp_ms, payload_bytes):
-    payload_len = len(payload_bytes)
+def build_header(msg_type:int, snapshot_id:int, seq_num:int, server_ts_ms:int, payload_len:int, checksum:int=0) -> bytes:
+    return struct.pack(HEADER_FMT, PROTO_ID, VERSION, msg_type, snapshot_id, seq_num, server_ts_ms, payload_len, checksum)
 
-    temp_header = struct.pack(
-        HEADER_FORMAT,
-        PROTOCOL_ID,
-        VERSION,
-        msg_type,
-        snapshot_id,
-        seq_num,
-        timestamp_ms,
-        payload_len,
-        0
-    )
-
-    crc = compute_crc32(temp_header, payload_bytes)
-
-    final_header = struct.pack(
-        HEADER_FORMAT,
-        PROTOCOL_ID,
-        VERSION,
-        msg_type,
-        snapshot_id,
-        seq_num,
-        timestamp_ms,
-        payload_len,
-        crc
-    )
-    return final_header
-
-def parse_and_validate_header(data):
-    if len(data) < HEADER_SIZE:
-        return None
-
-    header = data[:HEADER_SIZE]
-    payload = data[HEADER_SIZE:]
-
-    (
-        protocol_id,
-        version,
-        msg_type,
-        snapshot_id,
-        seq_num,
-        server_timestamp,
-        payload_len,
-        recv_checksum
-    ) = struct.unpack(HEADER_FORMAT, header)
-
-    if protocol_id != PROTOCOL_ID:
-        return None
-    if version != VERSION:
-        return None
-    if payload_len != len(payload):
-        return None
-
-    temp_header = struct.pack(
-        HEADER_FORMAT,
-        protocol_id,
-        version,
-        msg_type,
-        snapshot_id,
-        seq_num,
-        server_timestamp,
-        payload_len,
-        0
-    )
-    computed = compute_crc32(temp_header, payload)
-    if computed != recv_checksum:
-        return None
-
-    return {
-        "msg_type": msg_type,
-        "snapshot_id": snapshot_id,
-        "seq_num": seq_num,
-        "server_timestamp": server_timestamp,
-        "payload": payload,
-    }
-
-def send_packet(sock, addr, msg_type, snapshot_id, payload_bytes):
-    seq = next_seq_num()
-    timestamp = current_time_ms()
-    header = pack_header(msg_type, snapshot_id, seq, timestamp, payload_bytes)
-
-    sock.sendto(header + payload_bytes, addr)
-    print(f"[SEND] type={msg_type} seq={seq} to {addr}")
+def send_packet(sock, addr, msg_type:int, snapshot_id:int, payload:bytes, seq_num:int):
+    """
+    Build RFC header, compute CRC32 over header-with-zero-checksum + payload,
+    then send via UDP socket.
+    """
+    server_ts = current_time_ms()
+    payload_len = len(payload)
+    header_zero = build_header(msg_type, snapshot_id, seq_num, server_ts, payload_len, 0)
+    checksum = crc32(header_zero + payload)
+    header = build_header(msg_type, snapshot_id, seq_num, server_ts, payload_len, checksum)
+    packet = header + payload
+    sock.sendto(packet, addr)
+    return True

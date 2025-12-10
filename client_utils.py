@@ -1,169 +1,94 @@
+# client_utils.py
 import struct
+import binascii
 import time
-import zlib
-import csv
-from protocol_constants import (
-    HEADER_FORMAT,
-    HEADER_SIZE,
-    PROTOCOL_ID,
-    VERSION
-)
-
-# Client-side sequence counter
-seq_counter = 0
-
-def next_seq_num():
-    global seq_counter
-    seq_counter += 1
-    return seq_counter
+from protocol_constants import HEADER_FMT, HEADER_SIZE, PROTO_ID, VERSION, MAX_PACKET_BYTES
 
 def current_time_ms():
     return int(time.time() * 1000)
 
-def compute_crc32(header_without_crc, payload_bytes):
-    return zlib.crc32(header_without_crc + payload_bytes) & 0xFFFFFFFF
+def crc32(data: bytes) -> int:
+    return binascii.crc32(data) & 0xffffffff
 
-def pack_header(msg_type, snapshot_id, seq_num, timestamp_ms, payload_bytes):
-    payload_len = len(payload_bytes)
-    
-    temp_header = struct.pack(
-        HEADER_FORMAT,
-        PROTOCOL_ID,
-        VERSION,
-        msg_type,
-        snapshot_id,
-        seq_num,
-        timestamp_ms,
-        payload_len,
-        0
-    )
-    
-    crc = compute_crc32(temp_header, payload_bytes)
-    
-    final_header = struct.pack(
-        HEADER_FORMAT,
-        PROTOCOL_ID,
-        VERSION,
-        msg_type,
-        snapshot_id,
-        seq_num,
-        timestamp_ms,
-        payload_len,
-        crc
-    )
-    return final_header
-
-def parse_and_validate_header(data):
-    if len(data) < HEADER_SIZE:
+def parse_and_validate_header(raw: bytes):
+    """
+    Validates length, proto_id, CRC32 and returns dict:
+    {
+      'proto_id': b'CCLP', 'version': int, 'msg_type': int,
+      'snapshot_id': int, 'seq_num': int, 'server_ts': int,
+      'payload_len': int, 'checksum': int, 'payload': bytes
+    }
+    Returns None if invalid.
+    """
+    if len(raw) < HEADER_SIZE:
         return None
-    
-    header = data[:HEADER_SIZE]
-    payload = data[HEADER_SIZE:]
-    
-    (
-        protocol_id,
-        version,
-        msg_type,
-        snapshot_id,
-        seq_num,
-        server_timestamp,
-        payload_len,
-        recv_checksum
-    ) = struct.unpack(HEADER_FORMAT, header)
-    
-    if protocol_id != PROTOCOL_ID:
+    header = raw[:HEADER_SIZE]
+    payload = raw[HEADER_SIZE:]
+    try:
+        proto_id, version, msg_type, snapshot_id, seq_num, server_ts, payload_len, checksum = struct.unpack(HEADER_FMT, header)
+    except Exception:
         return None
-    if version != VERSION:
+    if proto_id != PROTO_ID or version != VERSION:
         return None
+    # verify payload length vs advertised
     if payload_len != len(payload):
+        # allow shorter/longer during dev, but reject
         return None
-    
-    temp_header = struct.pack(
-        HEADER_FORMAT,
-        protocol_id,
-        version,
-        msg_type,
-        snapshot_id,
-        seq_num,
-        server_timestamp,
-        payload_len,
-        0
-    )
-    computed = compute_crc32(temp_header, payload)
-    if computed != recv_checksum:
+    # verify CRC
+    header_zero = struct.pack(HEADER_FMT, proto_id, version, msg_type, snapshot_id, seq_num, server_ts, payload_len, 0)
+    if crc32(header_zero + payload) != checksum:
         return None
-    
     return {
-        "msg_type": msg_type,
-        "snapshot_id": snapshot_id,
-        "seq_num": seq_num,
-        "server_timestamp": server_timestamp,
-        "payload": payload,
+        'proto_id': proto_id,
+        'version': version,
+        'msg_type': msg_type,
+        'snapshot_id': snapshot_id,
+        'seq_num': seq_num,
+        'server_ts': server_ts,
+        'payload_len': payload_len,
+        'checksum': checksum,
+        'payload': payload
     }
 
-def send_packet(sock, addr, msg_type, snapshot_id, payload_bytes):
-    seq = next_seq_num()
-    timestamp = current_time_ms()
-    header = pack_header(msg_type, snapshot_id, seq, timestamp, payload_bytes)
-    
-    sock.sendto(header + payload_bytes, addr)
-    print(f"[CLIENT SEND] type={msg_type} seq={seq}")
-
-def parse_snapshot_payload(payload):
-    """Parse snapshot payload into grid state and scores."""
-    if len(payload) < 1:
-        return None
-    
-    num_snapshots = struct.unpack('!B', payload[0:1])[0]
-    snapshots = []
-    offset = 1
-    
-    for _ in range(num_snapshots):
-        if offset + 3 > len(payload):
-            break
-        
-        grid_size = struct.unpack('!B', payload[offset:offset+1])[0]
-        num_players = struct.unpack('!B', payload[offset+1:offset+2])[0]
-        game_over = struct.unpack('!?', payload[offset+2:offset+3])[0]
-        offset += 3
-        
-        grid_cells = grid_size * grid_size
-        if offset + grid_cells > len(payload):
-            break
-        
-        grid_data = struct.unpack(f'!{grid_cells}B', payload[offset:offset+grid_cells])
-        grid = []
-        for r in range(grid_size):
-            row = list(grid_data[r*grid_size:(r+1)*grid_size])
-            grid.append(row)
-        offset += grid_cells
-        
-        scores = {}
-        for _ in range(num_players):
-            if offset + 3 > len(payload):
+def parse_snapshot_payload(payload: bytes, grid_size:int):
+    """
+    Snapshot payload format (we use exactly the server build format):
+      1 byte: num_snapshots (N)
+      For each snapshot:
+        4 bytes snapshot_id (I)
+        8 bytes timestamp_ms (Q)
+        2 bytes grid_len (H)
+        grid_len bytes of grid (each cell 0..255)
+        (optional: scoreboard or flags are ignored by client display)
+    Return latest snapshot dict:
+      {'snapshot_id': int, 'server_ts': int, 'grid': [[...]]}
+    Returns None if parse fails.
+    """
+    try:
+        if len(payload) < 1:
+            return None
+        p = 0
+        num_snaps = payload[p]
+        p += 1
+        latest = None
+        for _ in range(num_snaps):
+            if p + 14 > len(payload):
                 break
-            player_id, score_high, score_low = struct.unpack('!BBB', payload[offset:offset+3])
-            scores[player_id] = (score_high << 8) | score_low
-            offset += 3
-        
-        snapshots.append({
-            "grid": grid,
-            "scores": scores,
-            "game_over": game_over,
-            "grid_size": grid_size
-        })
-    
-    return snapshots[0] if snapshots else None
-
-class MetricsLogger:
-    def __init__(self, filename="client_metrics.csv"):
-        self.filename = filename
-        with open(self.filename, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['client_id', 'snapshot_id', 'seq_num', 'server_timestamp', 'recv_time', 'latency_ms'])
-    
-    def log(self, client_id, snapshot_id, seq_num, server_timestamp, recv_time):
-        latency = recv_time - server_timestamp
-        with open(self.filename, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([client_id, snapshot_id, seq_num, server_timestamp, recv_time, latency])
+            sid = struct.unpack('!I', payload[p:p+4])[0]; p += 4
+            stime = struct.unpack('!Q', payload[p:p+8])[0]; p += 8
+            glen = struct.unpack('!H', payload[p:p+2])[0]; p += 2
+            if p + glen > len(payload):
+                break
+            grid_bytes = payload[p:p+glen]; p += glen
+            # convert to n x n grid if length matches
+            if glen == grid_size * grid_size:
+                flat = list(grid_bytes)
+                grid = [flat[i*grid_size:(i+1)*grid_size] for i in range(grid_size)]
+            else:
+                # incompatible grid size; skip
+                grid = None
+            if latest is None or sid > latest['snapshot_id']:
+                latest = {'snapshot_id': sid, 'server_ts': stime, 'grid': grid}
+        return latest
+    except Exception:
+        return None
