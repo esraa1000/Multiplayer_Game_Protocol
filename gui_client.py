@@ -14,7 +14,7 @@ from client_utils import (
 )
 
 # Server address
-SERVER_ADDR = ("192.168.8.102", 9999)
+SERVER_ADDR = (" 105.180.167.15", 9999)
 
 GRID_SIZE = 5
 CELL_SIZE = 80

@@ -1,0 +1,1 @@
+Average CPU Usage: 0.00%

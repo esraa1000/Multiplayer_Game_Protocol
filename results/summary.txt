@@ -1,0 +1,10 @@
+=== BASELINE TEST SUMMARY ===
+Average Latency: 3.46 ms
+Average Jitter: 1.10 ms
+Average CPU: 10.58%
+Average Bandwidth per Client: 49.01 kbps
+Mean Perceived Position Error: 2.55 units
+95th Percentile PPE: 4.73 units
+Critical Event Delivery <=200ms: 100.00%
+Total Snapshots: 100
+Test Duration: 5 sec
