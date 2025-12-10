@@ -1,6 +1,4 @@
 # protocol_constants.py
-# RFC-compliant protocol constants
-
 PROTO_ID = b'CCLP'
 VERSION = 1
 

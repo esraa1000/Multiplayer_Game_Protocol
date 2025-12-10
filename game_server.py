@@ -163,8 +163,15 @@ def snapshot_loop(sock):
         # broadcast to all players
         for pid, info in players.items():
             addr = info['addr']
+
+            # ---- send snapshot to this client ----
             send_packet(sock, addr, MSG_SNAPSHOT, sid, payload, seq_num=int(time.time()*1000) & 0xffffffff)
             info['last_snapshot_id'] = sid
+
+            # ---- LOG OUTGOING PACKET (required for 4.5) ----
+            with open(SEND_LOG, "a") as f:
+                f.write(f"{current_time_ms()},{addr},{pid},{sid},{len(payload)}\n")
+
         # check game over
         empty_exists = any(cell == 0 for row in grid for cell in row)
         if not empty_exists:
