@@ -297,14 +297,12 @@ def broadcast_snapshots(sock):
                 server_utils.send_packet(sock, addr, MSG_SNAPSHOT, snapshot_id, payload, seq)
                 metrics.log_packet_sent()
                 
-                # Optional redundancy: resend recent snapshots
-                if RETRANSMIT_K > 1:
-                    # Resend last K-1 snapshots for reliability
-                    for old_sid in list(client_state.pending_snapshots)[-RETRANSMIT_K:-1]:
-                        if old_sid > client_state.last_ack_snapshot:
-                            # Resend this old snapshot
-                            server_utils.send_packet(sock, addr, MSG_SNAPSHOT, old_sid, payload, seq)
-                            metrics.log_packet_sent()
+                effective_k = compute_adaptive_k(client_state, snapshot_id)
+                for old_sid in list(client_state.pending_snapshots)[-effective_k:-1]:
+                    if old_sid > client_state.last_ack_snapshot:
+                        # Resend this old snapshot
+                        server_utils.send_packet(sock, addr, MSG_SNAPSHOT, old_sid, payload, seq)
+                        metrics.log_packet_sent()
                 
                 # Log the send
                 if snapshot_id % 20 == 0:  # Log every 20th snapshot to reduce overhead
@@ -373,6 +371,21 @@ def handle_ack(data, addr):
                 )
     except:
         pass
+
+
+def compute_adaptive_k(client_state, current_sid):  
+    base_k = max(1, RETRANSMIT_K)
+    gap = max(0, current_sid - max(0, client_state.last_ack_snapshot))
+    extra = 0
+    if gap > 1:  # ADAPTIVE_THRESHOLD
+        extra += (gap - 1) * 1  # ADAPTIVE_EXTRA_PER_GAP
+    sent = client_state.packet_count_sent if client_state.packet_count_sent > 0 else 1
+    recv = client_state.packet_count_received
+    loss_estimate = max(0.0, 1.0 - (recv / sent)) if sent > 0 else 0.0
+    if loss_estimate > 0.1:  # LOSS_RATIO_THRESHOLD
+        extra += 1
+    effective_k = min(5, base_k + int(extra))  # MAX_ADAPTIVE_K
+    return max(1, effective_k)
 
 # --- Main server loop ---
 def server_loop():
