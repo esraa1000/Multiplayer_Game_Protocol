@@ -23,20 +23,24 @@ last_snapshot_id = -1
 current_grid = [[0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
 metrics = []
 stop_event = threading.Event()
+
+# shared structures and locks
 pending_events = {}
+pending_events_lock = threading.Lock()
+last_sent_ts = current_time_ms()
+last_sent_lock = threading.Lock()
+
 metrics_lock = threading.Lock()
 output_csv_path = None
-last_sent_ts = current_time_ms()
-
 
 
 def save_metrics():
     """Save metrics to CSV - called on exit"""
     global metrics, output_csv_path
-    
+
     if not output_csv_path:
         return
-        
+
     with metrics_lock:
         if metrics:
             try:
@@ -104,8 +108,9 @@ def simulate_user_clicks(sock):
     Click on random empty cells with some delay between clicks.
     This matches the interactive GUI behavior.
     """
+    global last_sent_ts
     print(f"[CLIENT] Player {player_id} starting to play...")
-    
+
     while not stop_event.is_set():
         # Find empty cells that this player can claim
         empty_cells = []
@@ -113,26 +118,29 @@ def simulate_user_clicks(sock):
             for c in range(GRID_SIZE):
                 if current_grid[r][c] == 0:
                     empty_cells.append((r, c))
-        
+
         if empty_cells:
             # Pick a random empty cell to "click"
             r, c = random.choice(empty_cells)
 
-            now=current_time_ms()
-            delta=now - last_sent_ts
+            now = current_time_ms()
+            # safely read/write last_sent_ts
+            with last_sent_lock:
+                delta = now - last_sent_ts
+                if delta < 0:
+                    delta = 0
+                if delta > 65535:
+                    delta = 65535
+                last_sent_ts = now
 
-            if delta<0:
-                delta=0
-            if delta > 65535:
-                delta=65535
-            last_sent_ts = now
-            
             # Send event for this cell
-            payload = struct.pack("!H H H", delta, r, c)
+            payload = struct.pack("!H H H", int(delta), r, c)
             seq = int(time.time() * 1000) & 0xffffffff
             server_utils.send_packet(sock, SERVER_ADDR, MSG_EVENT, 0, payload, seq)
-            pending_events[(r, c)] = {'sent_ts': current_time_ms(), 'retries': 0}
-            
+
+            with pending_events_lock:
+                pending_events[(r, c)] = {'sent_ts': current_time_ms(), 'retries': 0}
+
             # Human-like delay between clicks (200-500ms)
             time.sleep(random.uniform(0.2, 0.5))
         else:
@@ -142,34 +150,52 @@ def simulate_user_clicks(sock):
 
 def retransmit_loop(sock):
     """Retransmit pending events for reliability"""
+    global last_sent_ts
     while not stop_event.is_set():
         time.sleep(0.05)
         now = current_time_ms()
-        delta = now - last_sent_ts
 
-        if delta <0:
-            delta=0
-        if delta > 65535:
-            delta=65535
-        last_sent_ts = now
-        for (r, c), info in list(pending_events.items()):
-            if info['retries'] >= 5:
-                pending_events.pop((r, c), None)
-                continue
-            if now - info['sent_ts'] > 100:  # 100ms retransmit
-                payload = struct.pack("!H H H", delta, r, c)
-                seq = int(time.time() * 1000) & 0xffffffff
-                server_utils.send_packet(sock, SERVER_ADDR, MSG_EVENT, 0, payload, seq)
-                info['sent_ts'] = now
-                info['retries'] += 1
+        # update delta and last_sent_ts safely
+        with last_sent_lock:
+            delta = now - last_sent_ts
+            if delta < 0:
+                delta = 0
+            if delta > 65535:
+                delta = 65535
+            last_sent_ts = now
+
+        # copy items under lock to iterate safely
+        with pending_events_lock:
+            items = list(pending_events.items())
+
+        for (r, c), info in items:
+            # check again and update under lock to avoid races with resolve_pending_events
+            with pending_events_lock:
+                # ensure still present
+                if (r, c) not in pending_events:
+                    continue
+                info_ref = pending_events[(r, c)]
+
+                if info_ref['retries'] >= 5:
+                    pending_events.pop((r, c), None)
+                    continue
+
+                if now - info_ref['sent_ts'] > 100:  # 100ms retransmit
+                    payload = struct.pack("!H H H", int(delta), r, c)
+                    seq = int(time.time() * 1000) & 0xffffffff
+                    server_utils.send_packet(sock, SERVER_ADDR, MSG_EVENT, 0, payload, seq)
+                    # update reference
+                    pending_events[(r, c)]['sent_ts'] = now
+                    pending_events[(r, c)]['retries'] += 1
 
 
 def resolve_pending_events():
     """Remove events that are reflected in grid"""
-    for key in list(pending_events.keys()):
-        r, c = key
-        if 0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE and current_grid[r][c] != 0:
-            pending_events.pop(key, None)
+    with pending_events_lock:
+        for key in list(pending_events.keys()):
+            r, c = key
+            if 0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE and current_grid[r][c] != 0:
+                pending_events.pop(key, None)
 
 
 def calculate_position_error(server_grid, client_grid):
@@ -178,22 +204,22 @@ def calculate_position_error(server_grid, client_grid):
     This represents how many cells differ between what server says and what client has.
     """
     differences = 0
-    
+
     for r in range(GRID_SIZE):
         for c in range(GRID_SIZE):
             if server_grid[r][c] != client_grid[r][c]:
                 differences += 1
-    
+
     # Normalize to 0-10 scale
     total_cells = GRID_SIZE * GRID_SIZE
     error = (differences / total_cells) * 10.0
-    
+
     return error
 
 
 def receive_loop(sock, duration, scenario):
     global last_snapshot_id, current_grid, running
-    
+
     sock.settimeout(0.05)
     start_time = time.time()
     last_latency = None
@@ -221,7 +247,7 @@ def receive_loop(sock, duration, scenario):
         except Exception as e:
             print(f"[CLIENT] Receive error: {e}")
             break
-            
+
         parsed = parse_and_validate_header(data)
         if not parsed:
             continue
@@ -230,7 +256,7 @@ def receive_loop(sock, duration, scenario):
             snap = parse_snapshot_payload(parsed['payload'], GRID_SIZE)
             if not snap or snap["grid"] is None:
                 continue
-            
+
             sid = snap["snapshot_id"]
 
             # Check for missed snapshots (packet loss)
@@ -239,31 +265,31 @@ def receive_loop(sock, duration, scenario):
                 if sid > expected_next:
                     missed = sid - expected_next
                     missed_snapshots += missed
-            
+
             # Process snapshot if it's newer
             if sid > last_snapshot_id:
                 snapshot_ts = snap["server_ts"]
                 recv_ts = current_time_ms()
-                
+
                 # Calculate error before updating
                 old_grid = [row[:] for row in current_grid]
                 error = calculate_position_error(snap["grid"], old_grid)
-                
+
                 # Update grid from server
                 last_snapshot_id = sid
                 current_grid = [row[:] for row in snap["grid"]]
-                
+
                 resolve_pending_events()
 
                 latency = max(0, recv_ts - snapshot_ts)
                 jitter = abs(latency - last_latency) if last_latency is not None else 0
                 last_latency = latency
-                
+
                 try:
                     cpu_percent = psutil.cpu_percent(interval=None)
                 except:
                     cpu_percent = 0.0
-                    
+
                 bandwidth_kbps = len(data) * 8 * SNAPSHOT_RATE / 1000
 
                 metric = {
@@ -278,7 +304,7 @@ def receive_loop(sock, duration, scenario):
                     'cpu_percent': cpu_percent,
                     'bandwidth_per_client_kbps': bandwidth_kbps
                 }
-                
+
                 with metrics_lock:
                     metrics.append(metric)
 
@@ -293,7 +319,7 @@ def receive_loop(sock, duration, scenario):
                 if packet_count % 20 == 0:
                     total_expected = packet_count + missed_snapshots
                     loss_rate = (missed_snapshots / total_expected) * 100 if total_expected > 0 else 0
-                    cells_claimed = sum(1 for r in range(GRID_SIZE) for c in range(GRID_SIZE) 
+                    cells_claimed = sum(1 for r in range(GRID_SIZE) for c in range(GRID_SIZE)
                                        if current_grid[r][c] == player_id)
                     print(f"[CLIENT] {scenario}: {packet_count} snapshots, {missed_snapshots} missed ({loss_rate:.1f}% loss), "
                           f"claimed {cells_claimed} cells, latency={latency:.1f}ms, error={error:.3f}")
@@ -304,13 +330,13 @@ def receive_loop(sock, duration, scenario):
 
     print(f"[CLIENT] Receive loop ending. Collected {len(metrics)} metrics")
     print(f"[CLIENT] Total: {packet_count} received, {missed_snapshots} missed")
-    
+
     stop_event.set()
     running = False
-    
+
     click_thread.join(timeout=2.0)
     retrans_thread.join(timeout=2.0)
-    
+
     if position_log:
         position_log.close()
 
@@ -324,7 +350,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     output_csv_path = args.output_csv
-    
+
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
