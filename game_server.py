@@ -1,209 +1,427 @@
-# game_server.py
+# game_server.py (Full implementation with all requirements)
 import socket
 import struct
 import threading
 import time
-from collections import deque
-from server_utils import send_packet, current_time_ms
-from protocol_constants import MSG_INIT, MSG_INIT_ACK, MSG_SNAPSHOT, MSG_EVENT, MSG_GAME_OVER, MAX_PACKET_BYTES
-from client_utils import crc32  # optional utility; server uses own if needed
+import csv
+import psutil
+from collections import deque, Counter
+from protocol_constants import *
+import server_utils
 
-# Configuration
-SERVER_HOST = '0.0.0.0'
-SERVER_PORT = 9999
 GRID_SIZE = 5
-REDUNDANCY_K = 2
-SNAPSHOT_RATE_HZ = 20
+SNAPSHOT_RATE_HZ = DEFAULT_SNAPSHOT_RATE_HZ
+RETRANSMIT_K = DEFAULT_REdundancy_K  # How many times to send redundant snapshots
+BUFFER_SIZE = 4096
+MAX_CLIENTS = 4
 
-# Runtime state
-snapshot_counter = 0
+# Client state tracking
+class ClientState:
+    def __init__(self, player_id, addr, name):
+        self.player_id = player_id
+        self.addr = addr
+        self.name = name
+        self.last_ack_snapshot = -1  # Last snapshot client acknowledged
+        self.last_sent_snapshot = -1  # Last snapshot sent to this client
+        self.pending_snapshots = deque(maxlen=10)  # Recent snapshots not yet ACKed
+        self.packet_count_sent = 0
+        self.packet_count_received = 0
+        self.last_seen = time.time()
+
+clients = {}        # addr -> ClientState
+player_counter = 1
 grid = [[0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
-players = {}           # player_id -> {"addr": (ip,port), "name": name, "last_snapshot_id": int}
-addr_to_pid = {}       # (ip,port) -> player_id
-next_player_id = 1
-snapshot_history = deque(maxlen=REDUNDANCY_K)
-pending_events = []    # list of (event_ts_ms, player_id, row, col, arrival_order)
-arrival_seq = 0
+event_queue = deque()
+lock = threading.Lock()
+snapshot_id = 0
+running = True
 game_over = False
-player_scores = {}
 
-# Logging CSV filenames
-RECV_LOG = 'server_recv_log.csv'
-SEND_LOG = 'server_send_log.csv'
-EVENT_LOG = 'server_event_log.csv'
-
-# Helper: pack single snapshot
-def pack_single_snapshot(snapshot_id:int, server_ts:int, grid_state):
-    # grid_state: flattened list of bytes length GRID_SIZE*GRID_SIZE
-    grid_flat = [grid_state[r][c] for r in range(GRID_SIZE) for c in range(GRID_SIZE)]
-    grid_bytes = struct.pack(f'!{GRID_SIZE*GRID_SIZE}B', *grid_flat)
-    # minimal metadata: snapshot_id (I) + timestamp (Q) + grid_len (H) + grid_bytes
-    return struct.pack('!I Q H', snapshot_id, server_ts, len(grid_bytes)) + grid_bytes
-
-# Build payload containing up to K snapshots (newest-first)
-def build_snapshot_payload():
-    # snapshot_history stores tuples (snapshot_id, timestamp_ms, grid_flat_bytes)
-    snaps = list(snapshot_history)[-REDUNDANCY_K:]
-    payload_chunks = []
-    for sid, stime, grid_flat_bytes in snaps:
-        glen = len(grid_flat_bytes)
-        payload_chunks.append(struct.pack('!I Q H', sid, stime, glen) + grid_flat_bytes)
-    payload = struct.pack('!B', len(payload_chunks)) + b''.join(payload_chunks)
-    if len(payload) > MAX_PACKET_BYTES:
-        raise ValueError("Snapshot payload too large")
-    return payload
-
-# Apply acquire request server-authoritative
-def apply_acquire_request(player_id:int, row:int, col:int):
-    if 0 <= row < GRID_SIZE and 0 <= col < GRID_SIZE and grid[row][col] == 0:
-        grid[row][col] = player_id
-        player_scores[player_id] = player_scores.get(player_id, 0) + 1
-        return True
-    return False
-
-# Register new player (called when INIT received)
-def register_new_player(addr, player_name):
-    global next_player_id
-    pid = next_player_id
-    next_player_id += 1
-    players[pid] = {"addr": addr, "name": player_name, "last_snapshot_id": 0}
-    addr_to_pid[addr] = pid
-    player_scores[pid] = 0
-    print(f"[SERVER] New player {pid} from {addr} name={player_name}")
-    return pid
-
-# Process pending events in timestamp order
-def process_pending_events():
-    global pending_events
-    if not pending_events:
-        return
-    # sort by (event_ts, arrival_order)
-    pending_events.sort(key=lambda e: (e[0], e[4]))
-    while pending_events:
-        ev_ts, pid, row, col, arr = pending_events.pop(0)
-        applied = apply_acquire_request(pid, row, col)
-        # log
-        with open(EVENT_LOG, 'a') as f:
-            f.write(f"{current_time_ms()},{pid},{row},{col},{applied}\n")
-
-# Networking: receive loop
-def recv_loop(sock):
-    global arrival_seq, game_over
-    sock.settimeout(0.5)
-    while not game_over:
+# Performance metrics
+class PerformanceMetrics:
+    def __init__(self):
+        self.snapshot_count = 0
+        self.event_count = 0
+        self.start_time = time.time()
+        self.cpu_samples = []
+        self.packet_sent_count = 0
+        self.packet_recv_count = 0
+        
+    def log_snapshot(self):
+        self.snapshot_count += 1
+        
+    def log_event(self):
+        self.event_count += 1
+        
+    def log_packet_sent(self):
+        self.packet_sent_count += 1
+        
+    def log_packet_recv(self):
+        self.packet_recv_count += 1
+        
+    def sample_cpu(self):
         try:
-            data, addr = sock.recvfrom(4096)
-        except socket.timeout:
-            continue
-        recv_t = current_time_ms()
-        # validate header and CRC using client_utils.parse_and_validate_header semantics
-        from client_utils import parse_and_validate_header
-        parsed = parse_and_validate_header(data)
-        if parsed is None:
-            # invalid packet; ignore
-            continue
-        msg_type = parsed['msg_type']
-        payload = parsed['payload']
-        # log receive
-        with open(RECV_LOG, 'a') as f:
-            f.write(f"{recv_t},{addr},{hex(msg_type)},{parsed['seq_num']},{parsed['snapshot_id']}\n")
-        if msg_type == MSG_INIT:
-            # INIT payload: client_nonce (Q) + optionally name bytes
-            try:
-                if len(payload) >= 8:
-                    client_nonce = struct.unpack('!Q', payload[:8])[0]
-                    name = payload[8:].decode('utf-8', errors='ignore') if len(payload) > 8 else 'Player'
-                else:
-                    client_nonce = current_time_ms()
-                    name = 'Player'
-            except:
-                client_nonce = current_time_ms(); name='Player'
-            pid = register_new_player(addr, name)
-            # send INIT_ACK payload: client_nonce (Q) + assigned pid (I) + initial_snapshot_id (I) + server_time(Q)
-            initial_sid = snapshot_counter
-            init_ack_payload = struct.pack('!Q I I Q', client_nonce, pid, initial_sid, current_time_ms())
-            # use seq num from parsed for send index? use local counter
-            send_packet(sock, addr, MSG_INIT_ACK, 0, init_ack_payload, seq_num=int(time.time()*1000) & 0xffffffff)
-        elif msg_type == MSG_EVENT:
-            # EVENT payload: event_ts_ms (Q) row (H) col (H)
-            try:
-                ev_ts, row, col = struct.unpack('!Q H H', payload[:12])
-            except:
-                ev_ts = current_time_ms(); row = col = 0
-            # map addr to pid
-            pid = addr_to_pid.get(addr)
-            if pid is None:
-                # ignore events from unknown clients
-                continue
-            arrival_seq += 1
-            pending_events.append((ev_ts, pid, int(row), int(col), arrival_seq))
-        else:
-            # other messages ignored by server
-            continue
+            cpu = psutil.cpu_percent(interval=None)
+            self.cpu_samples.append(cpu)
+        except:
+            pass
+    
+    def get_stats(self):
+        elapsed = time.time() - self.start_time
+        return {
+            'uptime_seconds': elapsed,
+            'total_snapshots': self.snapshot_count,
+            'total_events': self.event_count,
+            'packets_sent': self.packet_sent_count,
+            'packets_received': self.packet_recv_count,
+            'snapshot_rate': self.snapshot_count / elapsed if elapsed > 0 else 0,
+            'avg_cpu': sum(self.cpu_samples) / len(self.cpu_samples) if self.cpu_samples else 0,
+            'max_cpu': max(self.cpu_samples) if self.cpu_samples else 0,
+        }
 
-# Snapshot broadcast loop
-def snapshot_loop(sock):
-    global snapshot_counter, game_over
-    interval = 1.0 / SNAPSHOT_RATE_HZ
-    while not game_over:
-        process_pending_events()
-        # build snapshot entry (snapshot_id, timestamp, grid_flat_bytes)
-        snapshot_counter += 1
-        sid = snapshot_counter
-        stime = current_time_ms()
-        flat = [grid[r][c] for r in range(GRID_SIZE) for c in range(GRID_SIZE)]
-        try:
-            grid_flat_bytes = struct.pack(f'!{GRID_SIZE*GRID_SIZE}B', *flat)
-        except Exception:
-            # fallback: convert to bytes manually
-            grid_flat_bytes = bytes([int(x) & 0xff for x in flat])
-        snapshot_history.append((sid, stime, grid_flat_bytes))
-        # build payload (up to K snapshots)
-        payload = build_snapshot_payload()
-        # broadcast to all players
-        for pid, info in players.items():
-            addr = info['addr']
+metrics = PerformanceMetrics()
 
-            # ---- send snapshot to this client ----
-            send_packet(sock, addr, MSG_SNAPSHOT, sid, payload, seq_num=int(time.time()*1000) & 0xffffffff)
-            info['last_snapshot_id'] = sid
+# Logging
+send_log = []  # For server_send_log.csv
+recv_log = []  # For server_recv_log.csv
+event_log = []  # For server_event_log.csv
 
-            # ---- LOG OUTGOING PACKET (required for 4.5) ----
-            with open(SEND_LOG, "a") as f:
-                f.write(f"{current_time_ms()},{addr},{pid},{sid},{len(payload)}\n")
+def log_message(msg):
+    print(msg)
 
-        # check game over
-        empty_exists = any(cell == 0 for row in grid for cell in row)
-        if not empty_exists:
-            # broadcast game over
-            scoreboard = sorted(player_scores.items(), key=lambda x: x[1], reverse=True)
-            data = struct.pack('!B', len(scoreboard))
-            for player_id, score in scoreboard:
-                data += struct.pack('!BH', player_id, score)
-            for pid, info in players.items():
-                send_packet(sock, info['addr'], MSG_GAME_OVER, sid, data, seq_num=int(time.time()*1000) & 0xffffffff)
-            game_over = True
-            print("[SERVER] Game over. scoreboard:", scoreboard)
-        time.sleep(interval)
-
-def start_server(host=SERVER_HOST, port=SERVER_PORT):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((host, port))
-    print(f"[SERVER] Listening on {host}:{port}")
-    t_recv = threading.Thread(target=recv_loop, args=(sock,), daemon=True)
-    t_snap = threading.Thread(target=snapshot_loop, args=(sock,), daemon=True)
-    t_recv.start()
-    t_snap.start()
+def save_logs():
+    """Save performance logs to CSV files"""
     try:
-        while not game_over:
-            time.sleep(1)
+        # Save send log
+        if send_log:
+            with open('server_send_log.csv', 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=['timestamp', 'msg_type', 'dest_addr', 
+                                                       'snapshot_id', 'payload_size'])
+                writer.writeheader()
+                writer.writerows(send_log)
+        
+        # Save receive log
+        if recv_log:
+            with open('server_recv_log.csv', 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=['timestamp', 'msg_type', 'src_addr', 
+                                                       'payload_size'])
+                writer.writeheader()
+                writer.writerows(recv_log)
+        
+        # Save event log
+        if event_log:
+            with open('server_event_log.csv', 'w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=['timestamp', 'player_id', 'row', 'col'])
+                writer.writeheader()
+                writer.writerows(event_log)
+        
+        # Save performance summary
+        stats = metrics.get_stats()
+        with open('server_performance.csv', 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=stats.keys())
+            writer.writeheader()
+            writer.writerow(stats)
+        
+        log_message("[SERVER] Logs saved successfully")
+    except Exception as e:
+        log_message(f"[SERVER] Error saving logs: {e}")
+
+# --- Connection / INIT handling ---
+def handle_init(sock, data, addr):
+    global player_counter
+    try:
+        nonce, name_bytes = struct.unpack("!Q16s", data[:24])
+        name = name_bytes.rstrip(b"\x00").decode()
+    except:
+        return
+
+    with lock:
+        if addr not in clients:
+            if len(clients) >= MAX_CLIENTS:
+                log_message(f"[SERVER] Rejected connection from {addr} (max clients reached)")
+                return
+            
+            pid = player_counter
+            clients[addr] = ClientState(pid, addr, name)
+            player_counter += 1
+            log_message(f"[SERVER] New player {pid} from {addr} name={name}")
+
+    # Send INIT_ACK
+    payload = struct.pack("!Q I I Q", nonce, clients[addr].player_id, 0, 0)
+    seq = int(time.time() * 1000) & 0xffffffff
+    server_utils.send_packet(sock, addr, MSG_INIT_ACK, 0, payload, seq)
+    
+    metrics.log_packet_sent()
+    send_log.append({
+        'timestamp': time.time(),
+        'msg_type': 'INIT_ACK',
+        'dest_addr': str(addr),
+        'snapshot_id': 0,
+        'payload_size': len(payload)
+    })
+
+# --- Event processing ---
+def process_event(sock, data, addr):
+    try:
+        ts, r, c = struct.unpack("!Q H H", data[:12])
+    except:
+        return
+    
+    with lock:
+        if addr in clients:
+            clients[addr].packet_count_received += 1
+            clients[addr].last_seen = time.time()
+        event_queue.append((addr, r, c, ts))
+        metrics.log_event()
+        
+    event_log.append({
+        'timestamp': time.time(),
+        'player_id': clients[addr].player_id if addr in clients else 0,
+        'row': r,
+        'col': c
+    })
+
+def apply_events():
+    with lock:
+        while event_queue:
+            addr, r, c, ts = event_queue.popleft()
+            if 0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE:
+                # Only claim if empty
+                if grid[r][c] == 0 and addr in clients:
+                    grid[r][c] = clients[addr].player_id
+
+def check_game_over():
+    """Check if game is over (all cells claimed)"""
+    with lock:
+        for r in range(GRID_SIZE):
+            for c in range(GRID_SIZE):
+                if grid[r][c] == 0:
+                    return False
+        return True
+
+def calculate_scores():
+    """Calculate score for each player"""
+    scores = Counter()
+    with lock:
+        for r in range(GRID_SIZE):
+            for c in range(GRID_SIZE):
+                if grid[r][c] != 0:
+                    scores[grid[r][c]] += 1
+    return scores
+
+def broadcast_game_over(sock):
+    """Broadcast game over message with scores"""
+    global game_over
+    
+    scores = calculate_scores()
+    scoreboard = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    
+    # Create payload
+    n_players = len(scoreboard)
+    payload = struct.pack("!B", n_players)
+    for pid, score in scoreboard:
+        payload += struct.pack("!B H", pid, score)
+    
+    # Log results
+    log_message("\n" + "="*60)
+    log_message("GAME OVER!")
+    log_message("="*60)
+    log_message("Final Scores:")
+    for pid, score in scoreboard:
+        log_message(f"  Player {pid}: {score} cells")
+    if scoreboard:
+        log_message(f"\nWinner: Player {scoreboard[0][0]} with {scoreboard[0][1]} cells!")
+    log_message("="*60 + "\n")
+    
+    # Broadcast to all clients (with redundancy)
+    with lock:
+        for addr in clients.keys():
+            # Send multiple times for reliability
+            for _ in range(3):
+                seq = int(time.time() * 1000) & 0xffffffff
+                server_utils.send_packet(sock, addr, MSG_GAME_OVER, 0, payload, seq)
+                metrics.log_packet_sent()
+                time.sleep(0.01)  # Small delay between redundant sends
+            
+            send_log.append({
+                'timestamp': time.time(),
+                'msg_type': 'GAME_OVER',
+                'dest_addr': str(addr),
+                'snapshot_id': 0,
+                'payload_size': len(payload)
+            })
+    
+    game_over = True
+
+# --- Snapshot broadcasting with redundancy ---
+def broadcast_snapshots(sock):
+    global snapshot_id, game_over
+    interval = 1.0 / SNAPSHOT_RATE_HZ
+    
+    while running and not game_over:
+        start = time.time()
+        apply_events()
+        
+        # Sample CPU periodically
+        if snapshot_id % 10 == 0:
+            metrics.sample_cpu()
+
+
+
+        with lock:
+            snapshot_id += 1
+            metrics.log_snapshot()
+            
+            # Pack grid into bytes
+            flat_grid = bytes([grid[r][c] for r in range(GRID_SIZE) for c in range(GRID_SIZE)])
+            payload = struct.pack("!B I Q H", 1, snapshot_id, server_utils.current_time_ms(), GRID_SIZE*GRID_SIZE)
+            payload += flat_grid
+
+            # Send to each client with optional redundancy
+            for addr, client_state in clients.items():
+                # Update client state
+                client_state.last_sent_snapshot = snapshot_id
+                client_state.pending_snapshots.append(snapshot_id)
+                client_state.packet_count_sent += 1
+                
+                seq = int(time.time() * 1000) & 0xffffffff
+                
+                # Primary send
+                server_utils.send_packet(sock, addr, MSG_SNAPSHOT, snapshot_id, payload, seq)
+                metrics.log_packet_sent()
+                
+                # Optional redundancy: resend recent snapshots
+                if RETRANSMIT_K > 1:
+                    # Resend last K-1 snapshots for reliability
+                    for old_sid in list(client_state.pending_snapshots)[-RETRANSMIT_K:-1]:
+                        if old_sid > client_state.last_ack_snapshot:
+                            # Resend this old snapshot
+                            server_utils.send_packet(sock, addr, MSG_SNAPSHOT, old_sid, payload, seq)
+                            metrics.log_packet_sent()
+                
+                # Log the send
+                if snapshot_id % 20 == 0:  # Log every 20th snapshot to reduce overhead
+                    send_log.append({
+                        'timestamp': time.time(),
+                        'msg_type': 'SNAPSHOT',
+                        'dest_addr': str(addr),
+                        'snapshot_id': snapshot_id,
+                        'payload_size': len(payload)
+                    })
+
+        elapsed = time.time() - start
+        time.sleep(max(0, interval - elapsed))
+        
+        # IMPORTANT: Give clients time to receive and render the final snapshot
+        # Check game over AFTER sending the snapshot, and add a small grace period
+        if check_game_over():
+            log_message("[SERVER] All cells claimed! Sending final snapshot one more time...")
+            # Send final snapshot once more to ensure all clients have it
+            time.sleep(0.1)  # 100ms grace period
+            with lock:
+                for addr, client_state in clients.items():
+                    seq = int(time.time() * 1000) & 0xffffffff
+                    server_utils.send_packet(sock, addr, MSG_SNAPSHOT, snapshot_id, payload, seq)
+            time.sleep(0.1)  # Another 100ms for clients to render
+            log_message("[SERVER] Game is over.")
+            broadcast_game_over(sock)
+            break
+    
+    # After game over, wait for clients to receive message
+    if game_over:
+        log_message("[SERVER] Waiting 5 seconds for clients to receive game over message...")
+        time.sleep(5)
+        
+        # Print final statistics
+        stats = metrics.get_stats()
+        log_message("\n" + "="*60)
+        log_message("SERVER PERFORMANCE STATISTICS")
+        log_message("="*60)
+        log_message(f"Uptime: {stats['uptime_seconds']:.1f} seconds")
+        log_message(f"Total Snapshots: {stats['total_snapshots']}")
+        log_message(f"Total Events: {stats['total_events']}")
+        log_message(f"Packets Sent: {stats['packets_sent']}")
+        log_message(f"Packets Received: {stats['packets_received']}")
+        log_message(f"Snapshot Rate: {stats['snapshot_rate']:.2f} Hz")
+        log_message(f"Average CPU: {stats['avg_cpu']:.1f}%")
+        log_message(f"Max CPU: {stats['max_cpu']:.1f}%")
+        log_message("="*60 + "\n")
+        
+        # Save logs
+        save_logs()
+
+# --- Handle ACKs (optional but recommended) ---
+def handle_ack(data, addr):
+    """Handle acknowledgment from client"""
+    try:
+        ack_snapshot_id = struct.unpack("!I", data[:4])[0]
+        with lock:
+            if addr in clients:
+                client_state = clients[addr]
+                client_state.last_ack_snapshot = max(client_state.last_ack_snapshot, ack_snapshot_id)
+                # Remove acknowledged snapshots from pending queue
+                client_state.pending_snapshots = deque(
+                    [sid for sid in client_state.pending_snapshots if sid > ack_snapshot_id],
+                    maxlen=10
+                )
+    except:
+        pass
+
+# --- Main server loop ---
+def server_loop():
+    global running
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("0.0.0.0", 9999))
+    sock.settimeout(0.05)
+    log_message(f"[SERVER] Listening on 0.0.0.0:9999")
+    log_message(f"[SERVER] Snapshot rate: {SNAPSHOT_RATE_HZ} Hz")
+    log_message(f"[SERVER] Redundancy factor: {RETRANSMIT_K}")
+    log_message(f"[SERVER] Max clients: {MAX_CLIENTS}")
+
+    # Start snapshot thread
+    snapshot_thread = threading.Thread(target=broadcast_snapshots, args=(sock,), daemon=True)
+    snapshot_thread.start()
+
+    try:
+        while running:
+            try:
+                data, addr = sock.recvfrom(BUFFER_SIZE)
+                metrics.log_packet_recv()
+            except socket.timeout:
+                continue
+            
+            parsed = None
+            if len(data) >= HEADER_SIZE:
+                parsed = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
+            if not parsed:
+                continue
+
+            msg_type = parsed[2]
+            payload = data[HEADER_SIZE:]
+            
+            # Log received message
+            recv_log.append({
+                'timestamp': time.time(),
+                'msg_type': msg_type,
+                'src_addr': str(addr),
+                'payload_size': len(payload)
+            })
+
+            if msg_type == MSG_INIT:
+                handle_init(sock, payload, addr)
+            elif msg_type == MSG_EVENT:
+                process_event(sock, payload, addr)
+            elif msg_type == MSG_ACK:
+                handle_ack(payload, addr)
+            elif msg_type == MSG_GAME_OVER:
+                log_message("[SERVER] Game over received from client")
+
     except KeyboardInterrupt:
-        print("[SERVER] shutting down")
+        log_message("\n[SERVER] Shutting down")
+        running = False
+        save_logs()
+
     sock.close()
 
 if __name__ == "__main__":
-    # create/clear logs
-    open(RECV_LOG, 'w').close()
-    open(SEND_LOG, 'w').close()
-    open(EVENT_LOG, 'w').close()
-    start_server()
+    server_loop()

@@ -1,4 +1,4 @@
-# gui_client.py (Fixed: Snapshot Ordering + Interpolation Smoothing + Retransmit)
+# gui_client.py (Fixed: Connection + Smooth Interpolation + Interactive Clicks)
 import threading
 import socket
 import struct
@@ -47,11 +47,13 @@ def rgb_to_hex(rgb):
     """Convert an (r,g,b) tuple to a Tk-compatible hex string."""
     return "#%02x%02x%02x" % (int(rgb[0]), int(rgb[1]), int(rgb[2]))
 
-# INIT handshake
+# INIT handshake - FIXED
 def connect():
     global player_id
     nonce = current_time_ms()
-    payload = struct.pack("!Q", nonce) + b"GUI_Player"
+    # FIX: Pad to exactly 16 bytes
+    client_name = b"GUI_Player\x00\x00\x00\x00\x00\x00"  # 10 chars + 6 nulls = 16 bytes
+    payload = struct.pack("!Q16s", nonce, client_name)
 
     seq = int(time.time()*1000) & 0xffffffff
     server_utils.send_packet(sock, SERVER_ADDR, MSG_INIT, 0, payload, seq)
@@ -59,25 +61,29 @@ def connect():
     sock.settimeout(5.0)
     try:
         data, _ = sock.recvfrom(4096)
-    except:
+    except Exception as e:
+        print(f"[GUI] Connection timeout: {e}")
         return False
 
     parsed = parse_and_validate_header(data)
     if not parsed or parsed["msg_type"] != MSG_INIT_ACK:
+        print(f"[GUI] Invalid response or wrong message type")
         return False
 
     try:
         client_nonce, pid, _, _ = struct.unpack("!Q I I Q", parsed["payload"][:24])
         if client_nonce != nonce:
+            print(f"[GUI] Nonce mismatch")
             return False
         player_id = pid
         print(f"[GUI] Connected as Player {player_id}")
         return True
-    except:
+    except Exception as e:
+        print(f"[GUI] Error parsing INIT_ACK: {e}")
         return False
 
 
-# EVENT sending
+# EVENT sending - User clicks to claim cells
 def send_move(row, col):
     if player_id is None:
         return
@@ -279,24 +285,39 @@ def show_game_over(payload, root):
         scoreboard = []
 
     def popup():
-        msg = "Game Over!\n" + "\n".join([f"P{pid}: {score}" for pid, score in scoreboard])
+        msg = "Game Over!\n\n" + "\n".join([f"Player {pid}: {score} cells" for pid, score in scoreboard])
+        if scoreboard:
+            winner = max(scoreboard, key=lambda x: x[1])
+            if winner[0] == player_id:
+                msg = f"🎉 You Won! 🎉\n\n{msg}"
+            else:
+                msg = f"Winner: Player {winner[0]}\n\n{msg}"
         messagebox.showinfo("Game Over", msg)
 
     root.after(0, popup)
 
 
-# MOUSE CLICK HANDLER
+# MOUSE CLICK HANDLER - User clicks to claim cells
 def on_click(event):
     r = event.y // CELL_SIZE
     c = event.x // CELL_SIZE
     if 0 <= r < GRID_SIZE and 0 <= c < GRID_SIZE:
-        send_move(r, c)
+        # Only send if cell is empty
+        if target_grid[r][c] == 0:
+            send_move(r, c)
+            print(f"[GUI] Player {player_id} clicked cell ({r}, {c})")
 
 
 # MAIN
 if __name__ == "__main__":
+    print("="*60)
+    print("CHRONOCLASH - Multiplayer Grid Game")
+    print("="*60)
+    print()
+    
     if not connect():
-        print("[GUI] Could not connect")
+        print("[GUI] Could not connect to server")
+        print("\nMake sure game_server.py is running!")
         exit(1)
 
     root = tk.Tk()
@@ -316,10 +337,16 @@ if __name__ == "__main__":
 
     canvas.bind("<Button-1>", on_click)
 
+    # Start background threads
     threading.Thread(target=recv_thread, args=(canvas, root), daemon=True).start()
     threading.Thread(target=retransmit_loop, daemon=True).start()
     threading.Thread(target=smoothing_loop, args=(canvas,), daemon=True).start()
 
+    print(f"\n✓ Connected as Player {player_id}")
+    print("Click on empty cells to claim them!")
+    print()
+
     root.mainloop()
     running = False
     sock.close()
+    print("\n[GUI] Game closed")
