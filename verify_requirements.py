@@ -53,9 +53,9 @@ def analyze_baseline(metrics):
             print(f"  Update rate: {actual_rate:.2f} updates/sec (need ≥20)")
             
             if actual_rate >= 18.0:  # Allow 10% tolerance
-                print(f"  ✅ Update rate: PASS")
+                print(f"  Update rate: PASS")
             else:
-                print(f"  ❌ Update rate: FAIL")
+                print(f"  Update rate: FAIL")
                 all_passed = False
     
     # 2. Latency
@@ -67,9 +67,9 @@ def analyze_baseline(metrics):
     print(f"  Max latency: {max_latency:.2f}ms")
     
     if avg_latency <= 50:
-        print(f"  ✅ Latency: PASS")
+        print(f"  Latency: PASS")
     else:
-        print(f"  ❌ Latency: FAIL")
+        print(f"  Latency: FAIL")
         all_passed = False
     
     # 3. CPU
@@ -81,9 +81,9 @@ def analyze_baseline(metrics):
     print(f"  Max CPU: {max_cpu:.1f}%")
     
     if avg_cpu < 60:
-        print(f"  ✅ CPU: PASS")
+        print(f"  CPU: PASS")
     else:
-        print(f"  ❌ CPU: FAIL")
+        print(f"  CPU: FAIL")
         all_passed = False
     
     return all_passed
@@ -107,15 +107,15 @@ def analyze_loss2(metrics):
     print(f"  Max error: {max_error:.3f} units")
     
     if mean_error <= 0.5:
-        print(f"  ✅ Mean error: PASS")
+        print(f"  Mean error: PASS")
     else:
-        print(f"  ❌ Mean error: FAIL")
+        print(f"  Mean error: FAIL")
         all_passed = False
     
     if percentile_95 <= 1.5:
-        print(f"  ✅ 95th percentile: PASS")
+        print(f"  95th percentile: PASS")
     else:
-        print(f"  ❌ 95th percentile: FAIL")
+        print(f"  95th percentile: FAIL")
         all_passed = False
     
     # Additional info: interpolation quality
@@ -146,9 +146,9 @@ def analyze_loss5(metrics):
     print(f"  Max latency: {max_latency:.2f}ms")
     
     if delivery_rate >= 99.0:
-        print(f"  ✅ Delivery rate: PASS (≥99% within 200ms)")
+        print(f"  Delivery rate: PASS (≥99% within 200ms)")
     else:
-        print(f"  ❌ Delivery rate: FAIL (need ≥99%)")
+        print(f"  Delivery rate: FAIL (need ≥99%)")
         all_passed = False
     
     # Check system stability (no crashes, consistent updates)
@@ -161,9 +161,9 @@ def analyze_loss5(metrics):
         print(f"  Update rate: {update_rate:.2f}/sec")
         
         if update_rate >= 15.0:  # System still functioning
-            print(f"  ✅ System stability: PASS")
+            print(f"  System stability: PASS")
         else:
-            print(f"  ⚠️  System stability: degraded but may be acceptable")
+            print(f"  System stability: degraded but may be acceptable")
     
     return all_passed
 
@@ -187,9 +187,9 @@ def analyze_delay100(metrics):
         print(f"  Update rate: {update_rate:.2f}/sec")
         
         if update_rate >= 10.0:  # Reasonable functioning threshold
-            print(f"  ✅ Clients functioning: PASS")
+            print(f"  Clients functioning: PASS")
         else:
-            print(f"  ❌ Clients functioning: FAIL")
+            print(f"  Clients functioning: FAIL")
             all_passed = False
     
     # Analyze latency to verify delay is applied correctly
@@ -202,9 +202,9 @@ def analyze_delay100(metrics):
     
     # With 100ms delay, latency should be around 100ms
     if 80 <= mean_latency <= 150:  # Allow some variance
-        print(f"  ✅ Delay applied correctly: PASS")
+        print(f"Delay applied correctly: PASS")
     else:
-        print(f"  ⚠️  Delay may not be applied correctly (expected ~100ms)")
+        print(f"Delay may not be applied correctly (expected ~100ms)")
     
     # Check for stability (no excessive jitter indicating misbehavior)
     jitters = [m['jitter_ms'] for m in metrics if m['jitter_ms'] > 0]
@@ -216,9 +216,9 @@ def analyze_delay100(metrics):
         print(f"  Max jitter: {max_jitter:.2f}ms")
         
         if mean_jitter < 50:  # Reasonable jitter threshold
-            print(f"  ✅ No visible misbehavior: PASS")
+            print(f"No visible misbehavior: PASS")
         else:
-            print(f"  ⚠️  High jitter detected (may indicate issues)")
+            print(f"High jitter detected (may indicate issues)")
     
     return all_passed
 
@@ -242,10 +242,10 @@ def analyze_metrics(csv_file, scenario):
                     'cpu_percent': float(row['cpu_percent']),
                 })
     except FileNotFoundError:
-        print(f"❌ File not found: {csv_file}\n")
+        print(f"File not found: {csv_file}\n")
         return False
     except Exception as e:
-        print(f"❌ Error reading file: {e}\n")
+        print(f"Error reading file: {e}\n")
         return False
     
     print(f"\n{'='*70}")
@@ -254,7 +254,7 @@ def analyze_metrics(csv_file, scenario):
     print(f"{'='*70}\n")
     
     if not metrics_by_client:
-        print("❌ No data found in file\n")
+        print("No data found in file\n")
         return False
     
     all_clients_passed = True
@@ -275,7 +275,7 @@ def analyze_metrics(csv_file, scenario):
         elif scenario == 'delay100':
             passed = analyze_delay100(metrics)
         else:
-            print(f"  ⚠️  Unknown scenario: {scenario}")
+            print(f"Unknown scenario: {scenario}")
             passed = False
         
         if not passed:
@@ -286,7 +286,7 @@ def analyze_metrics(csv_file, scenario):
     # Overall summary for this scenario
     print(f"{'='*70}")
     if all_clients_passed:
-        print(f"✅ {scenario.upper()}: ALL REQUIREMENTS PASSED")
+        print(f"{scenario.upper()}: ALL REQUIREMENTS PASSED")
     else:
         print(f"❌ {scenario.upper()}: SOME REQUIREMENTS FAILED")
     print(f"{'='*70}\n")
@@ -312,7 +312,7 @@ def check_all_scenarios(results_dir='results'):
         csv_file = f"{results_dir}/client_metrics_{scenario_key}.csv"
         
         if not os.path.exists(csv_file):
-            print(f"\n❌ Missing file: {csv_file}\n")
+            print(f"\nMissing file: {csv_file}\n")
             overall_pass = False
             results[scenario_name] = False
             continue
@@ -329,19 +329,21 @@ def check_all_scenarios(results_dir='results'):
     print("="*70)
     
     for scenario, passed in results.items():
-        status = "✅ PASS" if passed else "❌ FAIL"
+        status = "PASS" if passed else "FAIL"
         print(f"  {scenario.upper():15s}: {status}")
     
     print("="*70)
     
     if overall_pass:
-        print("✅ ALL SCENARIOS MEET REQUIREMENTS!")
+        print("ALL SCENARIOS MEET REQUIREMENTS!")
     else:
-        print("❌ SOME SCENARIOS FAILED REQUIREMENTS")
+        print("SOME SCENARIOS FAILED REQUIREMENTS")
     
     print("="*70 + "\n")
     
     return overall_pass
+
+
 
 
 if __name__ == "__main__":
