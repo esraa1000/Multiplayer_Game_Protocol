@@ -14,6 +14,7 @@ SNAPSHOT_RATE_HZ = DEFAULT_SNAPSHOT_RATE_HZ
 RETRANSMIT_K = DEFAULT_REdundancy_K  # How many times to send redundant snapshots
 BUFFER_SIZE = 4096
 MAX_CLIENTS = 4
+last_event_ts= server_utils.current_time_ms()   #added extra
 
 # Client state tracking
 class ClientState:
@@ -162,8 +163,14 @@ def handle_init(sock, data, addr):
 
 # --- Event processing ---
 def process_event(sock, data, addr):
+
+    global last_event_ts
     try:
-        ts, r, c = struct.unpack("!Q H H", data[:12])
+        delta, r, c = struct.unpack("!H H H", data[:12])  #chnaged from Q to H
+
+        ts= last_event_ts +delta   #added extra
+        last_event_ts= ts               #added extra
+
     except:
         return
     

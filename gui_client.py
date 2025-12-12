@@ -18,7 +18,7 @@ SMOOTHING_FPS = 60               # interpolation update rate
 SMOOTHING_DURATION = 0.12        # 120 ms smoothing per snapshot
 SNAPSHOT_RATE = 20               # must match server-side
 RETRANSMIT_INTERVAL = 1.0 / SNAPSHOT_RATE
-
+last_sent_ts = current_time_ms()
 # Runtime state
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -85,10 +85,22 @@ def connect():
 
 # EVENT sending - User clicks to claim cells
 def send_move(row, col):
+     
+    global last_sent_ts
+
+    now=current_time_ms()
+    delta = now - last_sent_ts
+
+    if delta<0:
+        delta=0
+    if delta > 65535:
+        delta=65535
+    last_sent_ts = now
+
     if player_id is None:
         return
 
-    payload = struct.pack("!Q H H", current_time_ms(), row, col)
+    payload = struct.pack("!H H H", delta, row, col)
     seq = int(time.time()*1000) & 0xffffffff
     server_utils.send_packet(sock, SERVER_ADDR, MSG_EVENT, 0, payload, seq)
 

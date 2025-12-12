@@ -26,6 +26,8 @@ stop_event = threading.Event()
 pending_events = {}
 metrics_lock = threading.Lock()
 output_csv_path = None
+last_sent_ts = current_time_ms()
+
 
 
 def save_metrics():
@@ -115,9 +117,18 @@ def simulate_user_clicks(sock):
         if empty_cells:
             # Pick a random empty cell to "click"
             r, c = random.choice(empty_cells)
+
+            now=current_time_ms()
+            delta=now - last_sent_ts
+
+            if delta<0:
+                delta=0
+            if delta > 65535:
+                delta=65535
+            last_sent_ts = now
             
             # Send event for this cell
-            payload = struct.pack("!Q H H", current_time_ms(), r, c)
+            payload = struct.pack("!H H H", delta, r, c)
             seq = int(time.time() * 1000) & 0xffffffff
             server_utils.send_packet(sock, SERVER_ADDR, MSG_EVENT, 0, payload, seq)
             pending_events[(r, c)] = {'sent_ts': current_time_ms(), 'retries': 0}
@@ -134,12 +145,19 @@ def retransmit_loop(sock):
     while not stop_event.is_set():
         time.sleep(0.05)
         now = current_time_ms()
+        delta = now - last_sent_ts
+
+        if delta <0:
+            delta=0
+        if delta > 65535:
+            delta=65535
+        last_sent_ts = now
         for (r, c), info in list(pending_events.items()):
             if info['retries'] >= 5:
                 pending_events.pop((r, c), None)
                 continue
             if now - info['sent_ts'] > 100:  # 100ms retransmit
-                payload = struct.pack("!Q H H", current_time_ms(), r, c)
+                payload = struct.pack("!H H H", delta, r, c)
                 seq = int(time.time() * 1000) & 0xffffffff
                 server_utils.send_packet(sock, SERVER_ADDR, MSG_EVENT, 0, payload, seq)
                 info['sent_ts'] = now
