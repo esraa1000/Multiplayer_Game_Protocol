@@ -29,7 +29,7 @@ class ClientState:
         self.packet_count_received = 0
         self.last_seen = time.time()
 
-clients = {}        # addr -> ClientState
+clients = {}     
 player_counter = 1
 grid = [[0 for _ in range(GRID_SIZE)] for _ in range(GRID_SIZE)]
 event_queue = deque()
@@ -127,7 +127,7 @@ def save_logs():
     except Exception as e:
         log_message(f"[SERVER] Error saving logs: {e}")
 
-# --- Connection / INIT handling ---
+
 def handle_init(sock, data, addr):
     global player_counter
     try:
@@ -166,10 +166,10 @@ def process_event(sock, data, addr):
 
     global last_event_ts
     try:
-        delta, r, c = struct.unpack("!H H H", data[:12])  #chnaged from Q to H
+        delta, r, c = struct.unpack("!H H H", data[:12])  
 
-        ts= last_event_ts +delta   #added extra
-        last_event_ts= ts               #added extra
+        ts= last_event_ts +delta   
+        last_event_ts= ts              
 
     except:
         return
@@ -317,7 +317,7 @@ def broadcast_snapshots(sock):
         elapsed = time.time() - start
         time.sleep(max(0, interval - elapsed))
         
-        # IMPORTANT: Give clients time to receive and render the final snapshot
+        # Give clients time to receive and render the final snapshot
         # Check game over AFTER sending the snapshot, and add a small grace period
         if check_game_over():
             log_message("[SERVER] All cells claimed! Sending final snapshot one more time...")
@@ -355,7 +355,7 @@ def broadcast_snapshots(sock):
         # Save logs
         save_logs()
 
-# --- Handle ACKs (optional but recommended) ---
+# --- Handle ACKs 
 def handle_ack(data, addr):
     """Handle acknowledgment from client"""
     try:

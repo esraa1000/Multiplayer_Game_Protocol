@@ -85,7 +85,6 @@ def parse_snapshot_payload(payload: bytes, grid_size:int):
                 flat = list(grid_bytes)
                 grid = [flat[i*grid_size:(i+1)*grid_size] for i in range(grid_size)]
             else:
-                # incompatible grid size; skip
                 grid = None
             if latest is None or sid > latest['snapshot_id']:
                 latest = {'snapshot_id': sid, 'server_ts': stime, 'grid': grid}
